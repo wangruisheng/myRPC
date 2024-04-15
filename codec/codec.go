@@ -9,7 +9,7 @@ import "io"
 // Error 是错误信息，客户端置为空，服务端如果如果发生错误，将错误信息置于 Error 中。
 type Header struct {
 	ServiceMethod string // format "Service.Method"
-	Seq           uint64 // sequence number chosen by client
+	Seq           uint64 // 客户端所选择的序列号
 	Error         string
 }
 
@@ -37,7 +37,7 @@ const (
 	JsonType Type = "application/json" // not implemented
 )
 
-// 建立 类型 和 处理方法 的映射函数
+// NewCodecFuncMap 类型 和 处理方法 的映射函数
 var NewCodecFuncMap map[Type]NewCodecFunc
 
 func init() {

@@ -28,10 +28,11 @@ func NewGobCodec(conn io.ReadWriteCloser) Codec {
 	return &GobCodec{
 		conn: conn,
 		buf:  buf,
-		dec:  gob.NewDecoder(conn),
-		enc:  gob.NewEncoder(buf),
+		// 将 conn 传入的数据解码
+		dec: gob.NewDecoder(conn),
+		// 编码好的数据写入 buf
+		enc: gob.NewEncoder(buf),
 	}
-
 }
 
 // 接着实现 ReadHeader、ReadBody、Write 和 Close 方法。(实现 Codec 接口)
@@ -39,10 +40,12 @@ func (c *GobCodec) Close() error {
 	return c.conn.Close()
 }
 
+// ReadHeader 传入的是 Header 接口体的指针 h，最后会将解码后的值赋给 h
 func (c *GobCodec) ReadHeader(h *Header) error {
 	return c.dec.Decode(h)
 }
 
+// ReadHeader 传入的是指针 body，最后会将解码后的值赋给 body
 func (c *GobCodec) ReadBody(body interface{}) error {
 	return c.dec.Decode(body)
 }
@@ -50,6 +53,7 @@ func (c *GobCodec) ReadBody(body interface{}) error {
 // 注意这里给返回值命名了，所以直接给err赋值即可，不用return
 func (c *GobCodec) Write(h *Header, body interface{}) (err error) {
 	defer func() {
+		// 将 buf当中的编码值（响应response） 刷新到 conn 当中
 		_ = c.buf.Flush()
 		if err != nil {
 			_ = c.Close()
