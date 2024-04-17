@@ -13,6 +13,8 @@ import (
 
 // 服务端的实现阶段
 
+// 【服务端-------接收请求、发送响应】
+
 const MagicNumber = 0x3bef5c
 
 // GeeRPC 客户端固定采用 JSON 编码 Option，
