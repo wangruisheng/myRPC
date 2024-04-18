@@ -2,12 +2,13 @@ package myRPC
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"log"
 	"myRPC/codec"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 )
 
@@ -17,7 +18,7 @@ import (
 
 const MagicNumber = 0x3bef5c
 
-// GeeRPC 客户端固定采用 JSON 编码 Option，
+// Option GeeRPC 客户端固定采用 JSON 编码 Option，
 // 后续的 header 和 body 的编码方式由 Option 中的 CodeType 指定，
 // 服务端首先使用 JSON 解码 Option，然后通过 Option 的 CodeType 解码剩余的内容。
 type Option struct {
@@ -32,6 +33,48 @@ var DefaultOption = &Option{
 
 // Server represents an RPC Server.
 type Server struct {
+	// Map类似于Go的Map [interface{}]interface{}，但是对于多个例程并发使用是安全的，不需要额外的锁或协程
+	serviceMap sync.Map
+}
+
+// Register 在 服务器Server 中注册对应结构体的方法
+func (server *Server) Register(rcvr interface{}) error {
+	s := newService(rcvr)
+	// LoadOrStore返回键的现有值(如果存在)。否则，它存储并返回给定的值。如果值已加载，则加载结果为true，如果已存储，则加载结果为false。
+	if _, dup := server.serviceMap.LoadOrStore(s.name, s); dup {
+		return errors.New("rpc: service alredy defined: " + s.name)
+	}
+	return nil
+}
+
+// Register 在默认服务当中注册方法
+func Register(rcvr interface{}) error {
+	return DefaultServer.Register(rcvr)
+}
+
+// 通过 ServiceMethod 从 serviceMap 中找到对应的 service
+func (server *Server) findService(serviceMethod string) (svc *service, mtype *methodType, err error) {
+	dot := strings.LastIndex(serviceMethod, ".")
+	if dot < 0 {
+		err = errors.New("rpc server: service/method request ill-formed" + serviceMethod)
+		return
+	}
+	//  ServiceMethod 的构成是 “Service.Method”，因此先将其分割成 2 部分，第一部分是 Service 的名称
+	serviceName, methodName := serviceMethod[:dot], serviceMethod[dot+1:]
+	// serviceMap 中找到对应的 service 实例
+	svci, ok := server.serviceMap.Load(serviceName)
+	if !ok {
+		err = errors.New("rpc server: can't find service " + serviceName)
+		return
+	}
+	svc = svci.(*service)
+	// 再从 service 实例的 method 中，找到对应的 methodType。
+	mtype = svc.method[methodName]
+	if mtype == nil {
+		err = errors.New("rpc server: can't find method" + methodName)
+	}
+	return
+
 }
 
 // NewServer returns a new Server.
@@ -42,7 +85,7 @@ func NewServer() *Server {
 // DefaultServer is the default instance of *Server.
 var DefaultServer = NewServer()
 
-// Acccept 实现了 Accept 方式，net.Listener 作为参数
+// Accept 实现了 Accept 方式，net.Listener 作为参数
 func (server *Server) Accept(lis net.Listener) {
 	for {
 		// for 循环等待 socket 连接建立
@@ -57,7 +100,7 @@ func (server *Server) Accept(lis net.Listener) {
 	}
 }
 
-// 直接默认用 DefaultServer 作为服务器，所以可以不用自己创建实例server，再用server.Accpet()
+// Acccept 直接默认用 DefaultServer 作为服务器，所以可以不用自己创建实例server，再用server.Accpet()
 // Accept accepts connections on the listener and serves requests
 // for each incoming connection.
 func Acccept(lis net.Listener) {
@@ -136,6 +179,8 @@ func (server *Server) serveCodec(cc codec.Codec) {
 type request struct {
 	h            *codec.Header
 	argv, replyv reflect.Value
+	mtype        *methodType
+	svc          *service
 }
 
 func (server *Server) readRequestHeader(cc codec.Codec) (*codec.Header, error) {
@@ -157,13 +202,30 @@ func (server *Server) readRequest(cc codec.Codec) (*request, error) {
 		return nil, err
 	}
 	req := &request{h: h}
-	// TODO：现在我们不知道请求类型
+	req.svc, req.mtype, err = server.findService(h.ServiceMethod)
+	if err != nil {
+		return req, err
+	}
+	req.argv = req.mtype.newArgv()
+	req.replyv = req.mtype.newReplyv()
+	// req.argv.Type().Kind() != reflect.Ptr 来检查请求参数的类型是否为指针类型。
+	//如果不是指针类型，就通过 req.argv.Addr() 获取其指针，并再次调用 Interface() 方法获取指针的接口值【转为interfance{}类型】。
+	//这样做的目的是为了确保最终获取到的 argvi 是请求参数的指针类型的接口值。
+	// 因为argvi是指针类型，和req.argv指向同一个内存地址，所以cc.ReadBody(argvi)读到的值，最终会在req.argv里
+	argvi := req.argv.Interface()
+	if req.argv.Type().Kind() != reflect.Ptr {
+		argvi = req.argv.Addr().Interface()
+	}
+	if err = cc.ReadBody(argvi); err != nil {
+		log.Println("rpc server: read body err:", err)
+		return req, err
+	}
 	// day1: 目前还不能判断 body 的类型，因此在 readRequest 和 handleRequest 中，day1 将 body 作为字符串处理。
 	//接收到请求，打印 header，并回复 geerpc resp ${req.h.Seq}。这一部分后续再实现。
-	req.argv = reflect.New(reflect.TypeOf(""))
-	if err = cc.ReadBody(req.argv.Interface()); err != nil {
-		log.Println("rpc server: read argv err:", err)
-	}
+	// req.argv = reflect.New(reflect.TypeOf(""))
+	//if err = cc.ReadBody(req.argv.Interface()); err != nil {
+	//	log.Println("rpc server: read argv err:", err)
+	//}
 	return req, nil
 }
 
@@ -175,12 +237,17 @@ func (server *Server) sendResponse(cc codec.Codec, h *codec.Header, body interfa
 	}
 }
 
+// 通过 req.svc.call 完成方法调用，将 replyv 传递给 sendResponse 完成序列化即可。
 func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup) {
 	// TODO 应调用已注册的rpc方法，获得正确的replyv
 	// day 1, 只是打印了 argv 并发送了 hello 信息
 	// 调用 Done() ，计数器减一
 	defer wg.Done()
-	log.Println(req.h, req.argv.Elem())
-	req.replyv = reflect.ValueOf(fmt.Sprintf("geerpc resp %d", req.h.Seq))
+	err := req.svc.call(req.mtype, req.argv, req.replyv)
+	if err != nil {
+		req.h.Error = err.Error()
+		server.sendResponse(cc, req.h, invalidRequest, sending)
+		return
+	}
 	server.sendResponse(cc, req.h, req.replyv.Interface(), sending)
 }

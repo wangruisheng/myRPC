@@ -9,7 +9,7 @@ import "io"
 // Error 是错误信息，客户端置为空，服务端如果如果发生错误，将错误信息置于 Error 中。
 type Header struct {
 	ServiceMethod string // format "Service.Method"
-	Seq           uint64 // 客户端所选择的序列号
+	Seq           uint64 // 请求的序列号
 	Error         string
 }
 

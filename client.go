@@ -18,7 +18,7 @@ import (
 // func (t *T) MethodName(argType T1, replyType *T2) error
 // 根据上述要求，首先我们封装了结构体 Call 来承载一次 RPC 调用所需要的信息。
 
-// call代表一个活跃的 RPC，封装一次 RPC 调用所需要的信息
+// Call 代表一个活跃的 RPC，封装一次 RPC 调用所需要的信息
 type Call struct {
 	Seq           uint64
 	ServiceMethod string      // 形式"<service>.<method>"
@@ -118,6 +118,7 @@ func (client *Client) receive() {
 	var err error
 	for err == nil {
 		var h codec.Header
+		// 在这里如果服务器没有响应应该会
 		if err = client.cc.ReadHeader(&h); err != nil {
 			break
 		}
