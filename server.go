@@ -3,6 +3,7 @@ package myRPC
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"myRPC/codec"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 )
 
 // 服务端的实现阶段
@@ -22,13 +24,16 @@ const MagicNumber = 0x3bef5c
 // 后续的 header 和 body 的编码方式由 Option 中的 CodeType 指定，
 // 服务端首先使用 JSON 解码 Option，然后通过 Option 的 CodeType 解码剩余的内容。
 type Option struct {
-	MagicNumber int        // MagicNumber marks this's a geerpc request，表示这是 geerpc 的请求
-	CodeType    codec.Type // client may choose different Codec to encode body，body编码格式
+	MagicNumber   int           // MagicNumber marks this's a geerpc request，表示这是 geerpc 的请求
+	CodeType      codec.Type    // client may choose different Codec to encode body，body编码格式
+	ConnecTimeout time.Duration // 0 意为着没有限制
+	HandleTimeout time.Duration // 处理报文时长限制
 }
 
 var DefaultOption = &Option{
-	MagicNumber: MagicNumber,
-	CodeType:    codec.GobType,
+	MagicNumber:   MagicNumber,
+	CodeType:      codec.GobType,
+	ConnecTimeout: time.Second * 10,
 }
 
 // Server represents an RPC Server.
@@ -134,7 +139,7 @@ func (server *Server) ServeConn(conn io.ReadWriteCloser) {
 		log.Printf("rpc server: invalid codec type %s", opt.CodeType)
 		return
 	}
-	server.serveCodec(f(conn))
+	server.serveCodec(f(conn), &opt)
 
 }
 
@@ -152,7 +157,7 @@ var invalidRequest = struct{}{}
 // handleRequest 使用了协程并发执行请求。
 // 处理请求是并发的，但是回复请求的报文必须是逐个发送的，并发容易导致多个回复报文交织在一起，客户端无法解析。在这里使用锁(sending)保证。
 // 尽力而为，只有在 header 解析失败时，才终止循环。
-func (server *Server) serveCodec(cc codec.Codec) {
+func (server *Server) serveCodec(cc codec.Codec, opt *Option) {
 	sending := new(sync.Mutex) // 互斥锁，保证发送一个完整的响应
 	wg := new(sync.WaitGroup)  // 等待，直到所有的请求都得到处理
 	for {
@@ -167,7 +172,7 @@ func (server *Server) serveCodec(cc codec.Codec) {
 			continue
 		}
 		wg.Add(1)
-		go server.handleRequest(cc, req, sending, wg)
+		go server.handleRequest(cc, req, sending, wg, opt.HandleTimeout)
 	}
 	// 当主 goroutine 执行 Wait() 方法时，如果计数器的值不为零，它就会被阻塞，
 	// 直到所有子 goroutine 执行 Done() 方法使计数器减为零，才会继续执行。
@@ -220,12 +225,6 @@ func (server *Server) readRequest(cc codec.Codec) (*request, error) {
 		log.Println("rpc server: read body err:", err)
 		return req, err
 	}
-	// day1: 目前还不能判断 body 的类型，因此在 readRequest 和 handleRequest 中，day1 将 body 作为字符串处理。
-	//接收到请求，打印 header，并回复 geerpc resp ${req.h.Seq}。这一部分后续再实现。
-	// req.argv = reflect.New(reflect.TypeOf(""))
-	//if err = cc.ReadBody(req.argv.Interface()); err != nil {
-	//	log.Println("rpc server: read argv err:", err)
-	//}
 	return req, nil
 }
 
@@ -238,16 +237,40 @@ func (server *Server) sendResponse(cc codec.Codec, h *codec.Header, body interfa
 }
 
 // 通过 req.svc.call 完成方法调用，将 replyv 传递给 sendResponse 完成序列化即可。
-func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup) {
-	// TODO 应调用已注册的rpc方法，获得正确的replyv
+// 这里需要确保 sendResponse 仅调用一次，因此将整个过程拆分为 called 和 sent 两个阶段，在这段代码中只会发生如下两种情况：
+// 1) called 信道接收到消息，代表处理没有超时，继续执行 sendResponse。
+// 2) time.After() 先于 called 接收到消息，说明处理已经超时，called 和 sent 都将被阻塞。在 case <-time.After(timeout) 处调用 sendResponse。
+func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
+	// 应调用已注册的rpc方法，获得正确的replyv
 	// day 1, 只是打印了 argv 并发送了 hello 信息
 	// 调用 Done() ，计数器减一
 	defer wg.Done()
-	err := req.svc.call(req.mtype, req.argv, req.replyv)
-	if err != nil {
-		req.h.Error = err.Error()
-		server.sendResponse(cc, req.h, invalidRequest, sending)
+	called := make(chan struct{})
+	sent := make(chan struct{})
+	go func() {
+		err := req.svc.call(req.mtype, req.argv, req.replyv)
+		called <- struct{}{}
+		if err != nil {
+			req.h.Error = err.Error()
+			server.sendResponse(cc, req.h, invalidRequest, sending)
+			sent <- struct{}{}
+			return
+		}
+		server.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+		sent <- struct{}{}
+	}()
+	// 如果不限制超时时间
+	if timeout == 0 {
+		<-called
+		<-sent
 		return
 	}
-	server.sendResponse(cc, req.h, req.replyv.Interface(), sending)
+	select {
+	case <-time.After(timeout):
+		req.h.Error = fmt.Sprintf("rpc server: request handle timeout: except within %s", timeout)
+		server.sendResponse(cc, req.h, invalidRequest, sending)
+	case <-called:
+		<-sent
+	}
+
 }
