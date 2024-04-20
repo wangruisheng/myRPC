@@ -1,6 +1,7 @@
 package myRPC
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"log"
 	"myRPC/codec"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -327,4 +330,47 @@ func (client *Client) Call(ctx context.Context, serviceMethod string, args, repl
 		return call.Error
 	}
 	return call.Error
+}
+
+// NewHTTPClient 创建一个新的客户端实例通过HTTP，来传输协议
+func NewHTTPClient(conn net.Conn, opt *Option) (*Client, error) {
+	// 通过连接 conn 向服务器发送一个 HTTP 请求
+	// 请求头格式 Method Request-URI HTTP-Version
+	_, _ = io.WriteString(conn, fmt.Sprintf("CONNECT %s HTTP/1.0\n\n", defaultRPCPath))
+
+	// 在转换到 RPC 协议之前，获取成功的 HTTP 请求
+	// 这一行代码调用了 http.ReadResponse() 函数，从连接中读取 HTTP 响应并解析它。它传递了一个 bufio.NewReader(conn) 作为读取器，用于从连接中读取响应数据，同时传递了一个新创建的 http.Request 对象作为预期的请求属性。这个请求对象指定了请求方法为 CONNECT。
+	// 解析完响应后，将响应对象赋值给 resp 变量，并将可能出现的错误赋值给 err 变量。
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	if err == nil && resp.Status == connected {
+		return NewClient(conn, opt)
+	}
+	if err == nil {
+		err = errors.New("unexpected HTTP response: " + resp.Status)
+	}
+	return nil, err
+}
+
+// DialHTTP 通过特定的网络地址连接到一个 HTTP RPC 服务
+// 监听默认的 HTTP RPC 路径
+func DialHTTP(network, address string, opts ...*Option) (*Client, error) {
+	return dialTimeout(NewHTTPClient, network, address, opts...)
+}
+
+// 根据第一个参数rpcAddr, XDial调用不同的函数来连接到RPC服务。
+// rpcAddr是表示rpc服务器的通用格式(protocol@addr)，
+// 例如http@10.0.0.1:7001, tcp@10.0.0.1:9999,unix@/tmp/geerpc.sock
+func XDial(rpcAddr string, opts ...*Option) (*Client, error) {
+	parts := strings.Split(rpcAddr, "@")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("rpc client err: wrong format '%s', expect protocol@addr", rpcAddr)
+	}
+	protocal, addr := parts[0], parts[1]
+	switch protocal {
+	case "http":
+		return DialHTTP("tcp", addr, opts...)
+	default:
+		// tcp，unix 或者其他交换协议
+		return Dial(protocal, addr, opts...)
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"log"
 	"myRPC/codec"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
@@ -105,10 +106,10 @@ func (server *Server) Accept(lis net.Listener) {
 	}
 }
 
-// Acccept 直接默认用 DefaultServer 作为服务器，所以可以不用自己创建实例server，再用server.Accpet()
+// Accept 直接默认用 DefaultServer 作为服务器，所以可以不用自己创建实例server，再用server.Accpet()
 // Accept accepts connections on the listener and serves requests
 // for each incoming connection.
-func Acccept(lis net.Listener) {
+func Accept(lis net.Listener) {
 	// DefaultServer 是一个默认的 Server 实例，主要为了用户使用方便。
 	DefaultServer.Accept(lis)
 }
@@ -273,4 +274,44 @@ func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.
 		<-sent
 	}
 
+}
+
+const (
+	connected        = "200 Connected to Gee PRC"
+	defaultRPCPath   = "/_myrpc_"
+	defaultDebugPath = "/debug/myrpc"
+)
+
+// ServeHTTP 实现一个 http.Handler 来响应 RPC 请求
+func (server *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.Method != "CONNECT" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "405 must CONNECT\n")
+		return
+	}
+	// 当不想使用内置服务器的HTTP协议实现时，请使用Hijack。
+	// “Hijack”让调用的人接管连接。在调用Hijack之后，HTTP服务器库将不会对连接执行任何其他操作。
+	//一般在在创建连接阶段使用HTTP连接，后续自己完全处理connection。
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Print("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
+		return
+	}
+	// 返回成功响，状态码200
+	_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
+	server.ServeConn(conn)
+}
+
+// HandleHTTP 在 rpcPath 路径上为RPC信息注册了一个 HTTP handler
+// 仍然需要调用http.Serve()
+func (server *Server) HandleHTTP() {
+	http.Handle(defaultRPCPath, server)
+	http.Handle(defaultDebugPath, debugHTTP{server})
+	log.Println("rpc server debug path:", defaultDebugPath)
+}
+
+// HandleHTTP 是一个在 default server 上注册 HTTP handlers 的快捷方法
+func HandleHTTP() {
+	DefaultServer.HandleHTTP()
 }

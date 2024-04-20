@@ -5,6 +5,7 @@ import (
 	"log"
 	"myRPC"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -83,10 +84,45 @@ func main() {
 
 	// 版本3
 	// 构造参数，发送 RPC 请求，并打印结果。
+	//log.SetFlags(0)
+	//addr := make(chan string)
+	//go startServer(addr)
+	//client, _ := myRPC.Dial("tcp", <-addr)
+	//defer func() {
+	//	_ = client.Close()
+	//}()
+	//time.Sleep(time.Second)
+	//// 发送请求并接收响应
+	//var wg sync.WaitGroup
+	//for i := 0; i < 5; i++ {
+	//	wg.Add(1)
+	//	go func(i int) {
+	//		defer wg.Done()
+	//		args := Args{
+	//			Num1: i,
+	//			Num2: i * i,
+	//		}
+	//		var reply int
+	//		if err := client.Call(context.Background(), "Foo.Sum", args, &reply); err != nil {
+	//			log.Fatal("call Foo.Sum error:", err)
+	//		}
+	//		log.Printf("%d + %d = %d", args.Num1, args.Num2, reply)
+	//	}(i)
+	//}
+	//// 到0才继续执行
+	//wg.Wait()
+
+	// 版本4
+	// 客户端将 Dial 替换为 DialHTTP，其余地方没有发生改变。
+	// 并且客户端单独用协程运行
 	log.SetFlags(0)
-	addr := make(chan string)
-	go startServer(addr)
-	client, _ := myRPC.Dial("tcp", <-addr)
+	ch := make(chan string)
+	go call(ch)
+	startServer(ch)
+}
+
+func call(addr chan string) {
+	client, _ := myRPC.DialHTTP("tcp", <-addr)
 	defer func() {
 		_ = client.Close()
 	}()
@@ -125,16 +161,27 @@ func startServer(addr chan string) {
 
 	// 版本3
 	// 注册 Foo 到 Server 中，并启动 RPC 服务
+	//var foo Foo
+	//if err := myRPC.Register(&foo); err != nil {
+	//	log.Fatal("register error :", err)
+	//}
+	//// 选择空闲的结点
+	//l, err := net.Listen("tcp", ":0")
+	//if err != nil {
+	//	log.Fatal("network error:", err)
+	//}
+	//log.Println("start rpc server on", l.Addr())
+	//addr <- l.Addr().String()
+	//myRPC.Accept(l)
+
+	// 版本4
+	// 将 startServer 中的 geerpc.Accept() 替换为了 geerpc.HandleHTTP()，端口固定为 9999。
 	var foo Foo
-	if err := myRPC.Register(&foo); err != nil {
-		log.Fatal("register error :", err)
-	}
-	// 选择空闲的结点
-	l, err := net.Listen("tcp", ":0")
-	if err != nil {
-		log.Fatal("network error:", err)
-	}
-	log.Println("start rpc server on", l.Addr())
+	_ = myRPC.Register(&foo)
+	// 选择端口9999
+	l, _ := net.Listen("tcp", ":9999")
+	// 注册 HTTP handler
+	myRPC.HandleHTTP()
 	addr <- l.Addr().String()
-	myRPC.Acccept(l)
+	_ = http.Serve(l, nil)
 }
