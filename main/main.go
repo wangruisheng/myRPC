@@ -4,8 +4,8 @@ import (
 	"context"
 	"log"
 	"myRPC"
+	"myRPC/xclient"
 	"net"
-	"net/http"
 	"sync"
 	"time"
 )
@@ -25,6 +25,76 @@ type Args struct {
 func (f Foo) Sum(args Args, reply *int) error {
 	*reply = args.Num1 + args.Num2
 	return nil
+}
+
+// Sleep 用于验证 XClient 的超时机制能否正常运作。
+func (f Foo) Sleep(args Args, reply *int) error {
+	time.Sleep(time.Second * time.Duration(args.Num1))
+	*reply = args.Num1 + args.Num2
+	return nil
+}
+
+// 启动服务器，并让服务器选择一个 ip端口 进行监听
+func startServer(addr chan string) {
+	// 选择一个空闲的 ip+端口 进行监听
+	//l, err := net.Listen("tcp", ":0")
+	//if err != nil {
+	//	log.Fatal("network error:", err)
+	//}
+	//log.Println("start rpc server on", l.Addr())
+	//addr <- l.Addr().String()
+	//myRPC.Acccept(l)
+
+	// 版本3
+	// 注册 Foo 到 Server 中，并启动 RPC 服务
+	//var foo Foo
+	//if err := myRPC.Register(&foo); err != nil {
+	//	log.Fatal("register error :", err)
+	//}
+	//// 选择空闲的结点
+	//l, err := net.Listen("tcp", ":0")
+	//if err != nil {
+	//	log.Fatal("network error:", err)
+	//}
+	//log.Println("start rpc server on", l.Addr())
+	//addr <- l.Addr().String()
+	//myRPC.Accept(l)
+
+	// 版本4
+	// 将 startServer 中的 geerpc.Accept() 替换为了 geerpc.HandleHTTP()，端口固定为 9999。
+	//var foo Foo
+	//_ = myRPC.Register(&foo)
+	//// 选择端口9999
+	//l, _ := net.Listen("tcp", ":9999")
+	//// 注册 HTTP handler
+	//myRPC.HandleHTTP()
+	//addr <- l.Addr().String()
+	//_ = http.Serve(l, nil)
+
+	// 版本6
+	var foo Foo
+	l, _ := net.Listen("tcp", ":0")
+	server := myRPC.NewServer()
+	_ = server.Register(&foo)
+	addr <- l.Addr().String()
+	server.Accept(l)
+}
+
+// 封装一个方法 foo，便于在 Call 或 Broadcast 之后统一打印成功或失败的日志
+func foo(xc *xclient.XClient, ctx context.Context, typ, serviceMethod string, args *Args) {
+	var reply int
+	var err error
+	switch typ {
+	case "call":
+		err = xc.Call(ctx, serviceMethod, args, &reply)
+	case "broadcast":
+		err = xc.Broadcast(ctx, serviceMethod, args, &reply)
+	}
+	if err != nil {
+		log.Printf("%s %s error: %v", typ, serviceMethod, err)
+	} else {
+		log.Printf("%s %s success: %d + %d = %d", typ, serviceMethod, args.Num1, args.Num2, reply)
+	}
 }
 
 func main() {
@@ -115,73 +185,85 @@ func main() {
 	// 版本4
 	// 客户端将 Dial 替换为 DialHTTP，其余地方没有发生改变。
 	// 并且客户端单独用协程运行
+	//log.SetFlags(0)
+	//ch := make(chan string)
+	//go call(ch)
+	//startServer(ch)
+
+	// 版本6
 	log.SetFlags(0)
-	ch := make(chan string)
-	go call(ch)
-	startServer(ch)
+	ch1 := make(chan string)
+	ch2 := make(chan string)
+	// 开两个服务器
+	go startServer(ch1)
+	go startServer(ch2)
+
+	addr1 := <-ch1
+	addr2 := <-ch2
+
+	time.Sleep(time.Second)
+	call(addr1, addr2)
+	broadCast(addr1, addr2)
 }
 
-func call(addr chan string) {
-	client, _ := myRPC.DialHTTP("tcp", <-addr)
-	defer func() {
-		_ = client.Close()
-	}()
-	time.Sleep(time.Second)
-	// 发送请求并接收响应
+//func call(addr chan string) {
+//	client, _ := myRPC.DialHTTP("tcp", <-addr)
+//	defer func() {
+//		_ = client.Close()
+//	}()
+//	time.Sleep(time.Second)
+//	// 发送请求并接收响应
+//	var wg sync.WaitGroup
+//	for i := 0; i < 5; i++ {
+//		wg.Add(1)
+//		go func(i int) {
+//			defer wg.Done()
+//			args := Args{
+//				Num1: i,
+//				Num2: i * i,
+//			}
+//			var reply int
+//			if err := client.Call(context.Background(), "Foo.Sum", args, &reply); err != nil {
+//				log.Fatal("call Foo.Sum error:", err)
+//			}
+//			log.Printf("%d + %d = %d", args.Num1, args.Num2, reply)
+//		}(i)
+//	}
+//	// 到0才继续执行
+//	wg.Wait()
+//}
+
+// call 调用单个服务实例
+func call(addr1, addr2 string) {
+	d := xclient.NewMultiServersDiscovery([]string{"tcp@" + addr1, "tcp@" + addr2})
+	xc := xclient.NewXClient(d, xclient.RandomSelect, nil)
+	defer func() { _ = xc.Close() }()
+	// 发送请求接受响应
 	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			args := Args{
-				Num1: i,
-				Num2: i * i,
-			}
-			var reply int
-			if err := client.Call(context.Background(), "Foo.Sum", args, &reply); err != nil {
-				log.Fatal("call Foo.Sum error:", err)
-			}
-			log.Printf("%d + %d = %d", args.Num1, args.Num2, reply)
+			foo(xc, context.Background(), "call", "Foo.Sum", &Args{Num1: i, Num2: i * i})
 		}(i)
 	}
-	// 到0才继续执行
 	wg.Wait()
 }
 
-// 启动服务器，并让服务器选择一个 ip端口 进行监听
-func startServer(addr chan string) {
-	// 选择一个空闲的 ip+端口 进行监听
-	//l, err := net.Listen("tcp", ":0")
-	//if err != nil {
-	//	log.Fatal("network error:", err)
-	//}
-	//log.Println("start rpc server on", l.Addr())
-	//addr <- l.Addr().String()
-	//myRPC.Acccept(l)
-
-	// 版本3
-	// 注册 Foo 到 Server 中，并启动 RPC 服务
-	//var foo Foo
-	//if err := myRPC.Register(&foo); err != nil {
-	//	log.Fatal("register error :", err)
-	//}
-	//// 选择空闲的结点
-	//l, err := net.Listen("tcp", ":0")
-	//if err != nil {
-	//	log.Fatal("network error:", err)
-	//}
-	//log.Println("start rpc server on", l.Addr())
-	//addr <- l.Addr().String()
-	//myRPC.Accept(l)
-
-	// 版本4
-	// 将 startServer 中的 geerpc.Accept() 替换为了 geerpc.HandleHTTP()，端口固定为 9999。
-	var foo Foo
-	_ = myRPC.Register(&foo)
-	// 选择端口9999
-	l, _ := net.Listen("tcp", ":9999")
-	// 注册 HTTP handler
-	myRPC.HandleHTTP()
-	addr <- l.Addr().String()
-	_ = http.Serve(l, nil)
+func broadCast(addr1, addr2 string) {
+	d := xclient.NewMultiServersDiscovery([]string{"tcp@" + addr1, "tcp@" + addr2})
+	xc := xclient.NewXClient(d, xclient.RandomSelect, nil)
+	defer func() { _ = xc.Close() }()
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			foo(xc, context.Background(), "broadcast", "Foo.Sum", &Args{Num1: i, Num2: i * i})
+			//expect 2 - 5 timeout
+			ctx, _ := context.WithTimeout(context.Background(), time.Second*2)
+			foo(xc, ctx, "broadcast", "Foo.Sleep", &Args{Num1: i, Num2: i * i})
+		}(i)
+	}
+	wg.Wait()
 }
